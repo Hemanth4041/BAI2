@@ -24,8 +24,7 @@ def encrypt_value(project_id: str, location: str, key_ring: str, customer_id: st
         }
     )
     return {
-        "ciphertext": base64.b64encode(response.ciphertext).decode("utf-8"),
-        # "key_name": key_name.split("/")[-1]
+        "ciphertext": base64.b64encode(response.ciphertext).decode("utf-8")
     }
 
 

@@ -51,7 +51,12 @@
     "account_name": null,
     "source_system": "ext"
   },
-
+  "sensitive_columns": [
+    "account_number",
+    "closing_balance",
+    "opening_balance",
+    "transaction_amount"
+  ], 
   "validation_rules": {
     "required_fields": [
       "account_number",
@@ -132,5 +137,5 @@
       "bai_field": "amount"
     }
   ]
-  
+
 }

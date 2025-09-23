@@ -1,7 +1,8 @@
 import os
+import io
 import json
 import logging
-from google.cloud import bigquery
+from google.cloud import bigquery, storage
 from google.api_core.exceptions import NotFound
 from bai_lib.bai2 import parse_from_file
 from encrypt import encrypt_row
@@ -14,7 +15,6 @@ MAPPING_CONFIG_FILE = "bq_mapping.json"
 LOCATION = "global"
 KEY_RING = "anz_encrypt"
 
-SENSITIVE_FIELDS = ["account_number","closing_balance","opening_balance","transaction_amount"] 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -35,7 +35,21 @@ def apply_default_values(row, default_values):
         if key not in row or row[key] is None:
             row[key] = val
 
+def get_sensitive_fields(config):
+    """Get sensitive columns from config JSON."""
+    return config.get("sensitive_columns", [])
 
+def read_file_from_gcs(gcs_path: str) -> str:
+    """Read file contents directly from GCS bucket."""
+    if "/" not in gcs_path:
+        raise ValueError("INPUT_BAI_FILE must be in format 'bucket_name/path/to/file'")
+    bucket_name, blob_name = gcs_path.split("/", 1)
+
+    storage_client = storage.Client(project=PROJECT_ID)
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(blob_name)
+
+    return blob.download_as_text()
 def run_parser(input_file: str, config_file: str):
     bank_id, customer_id = get_bank_and_customer_from_filename(input_file)
     logger.info(f"Bank ID: {bank_id}")
@@ -50,9 +64,9 @@ def run_parser(input_file: str, config_file: str):
 
     code_map = {m["bai_code"]: m for m in mappings}
     default_values = config.get("default_values", {})
-    # Parsing the file
-    with open(input_file, "r") as f:
-        bai_file = parse_from_file(f, check_integrity=True)
+
+    bai_text = read_file_from_gcs(input_file)
+    bai_file = parse_from_file(io.StringIO(bai_text), check_integrity=True)
 
     rows = []
     for group_idx, group in enumerate(bai_file.children):
@@ -136,8 +150,9 @@ def main():
     rows = run_parser(INPUT_BAI_FILE, MAPPING_CONFIG_FILE)
     config = load_config(MAPPING_CONFIG_FILE)
     validate_rows(rows, config)
+    sensitive_fields = get_sensitive_fields(config)
     encrypted_rows = [
-        encrypt_row(PROJECT_ID, LOCATION, KEY_RING, row, SENSITIVE_FIELDS)
+        encrypt_row(PROJECT_ID, LOCATION, KEY_RING, row, sensitive_fields)
         for row in rows
     ]
 
