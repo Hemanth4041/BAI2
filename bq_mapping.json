@@ -168,7 +168,7 @@
       "name": "transaction_amount",
       "type": "INTEGER",
       "mode": "REQUIRED",
-      "sensitive": true,
+      "sensitive": false,
       "required": true,
       "nullable": false
     },
@@ -187,14 +187,6 @@
       "sensitive": false,
       "required": false,
       "nullable": true
-    },
-    {
-      "name": "balance_date",
-      "type": "DATE",
-      "mode": "REQUIRED",
-      "sensitive": false,
-      "required": true,
-      "nullable": false
     }
   ],
 
@@ -298,15 +290,6 @@
           "sensitive": false,
           "required": true,
           "nullable": false
-        },
-        {
-          "bai_code": "195",
-          "bai_field": "amount",
-          "bq_column": "interest_paid",
-          "table": "balance",
-          "sensitive": false,
-          "required": false,
-          "nullable": true
         },
         {
           "bai_code": "100",
