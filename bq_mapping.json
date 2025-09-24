@@ -1,141 +1,323 @@
 {
-  "bq_schema": [
+  "common_fields_schema": [
     {
-      "name": "account_name",
+      "name": "organisation_biz_id",
       "type": "STRING",
-      "mode": "NULLABLE"
+      "mode": "REQUIRED",
+      "sensitive": false,
+      "required": true,
+      "nullable": false
     },
     {
-      "name": "account_number",
+      "name": "division_biz_id",
       "type": "STRING",
-      "mode": "REQUIRED"
-    },
-    {
-      "name": "balance_date",
-      "type": "DATE",
-      "mode": "REQUIRED"
-    },
-    {
-      "name": "currency_code",
-      "type": "STRING",
-      "mode": "REQUIRED"
-    },
-    {
-      "name": "closing_balance",
-      "type": "INTEGER",
-      "mode": "NULLABLE"
-    },
-    {
-      "name": "opening_balance",
-      "type": "INTEGER",
-      "mode": "NULLABLE"
-    },
-    {
-      "name": "overdraft_limit",
-      "type": "INTEGER",
-      "mode": "NULLABLE"
+      "mode": "REQUIRED",
+      "sensitive": false,
+      "required": true,
+      "nullable": false
     },
     {
       "name": "source_system",
       "type": "STRING",
-      "mode": "REQUIRED"
+      "mode": "REQUIRED",
+      "sensitive": false,
+      "required": true,
+      "nullable": false,
+      "default_value": "external"
+    },
+    {
+      "name": "account_name",
+      "type": "STRING",
+      "mode": "NULLABLE",
+      "sensitive": false,
+      "required": false,
+      "nullable": true,
+      "default_value": null
+    },
+    {
+      "name": "account_number",
+      "type": "STRING",
+      "mode": "REQUIRED",
+      "sensitive": true,
+      "required": true,
+      "nullable": false
+    }
+  ],
+
+  "balance_table_schema": [
+    {
+      "name": "bsb",
+      "type": "STRING",
+      "mode": "NULLABLE",
+      "sensitive": false,
+      "required": false,
+      "nullable": true
+    },
+    {
+      "name": "financial_institute",
+      "type": "STRING",
+      "mode": "NULLABLE",
+      "sensitive": false,
+      "required": false,
+      "nullable": true
+    },
+    {
+      "name": "balance_date",
+      "type": "DATE",
+      "mode": "REQUIRED",
+      "sensitive": false,
+      "required": true,
+      "nullable": false
+    },
+    {
+      "name": "currency",
+      "type": "STRING",
+      "mode": "REQUIRED",
+      "sensitive": false,
+      "required": true,
+      "nullable": false
+    },
+    {
+      "name": "closing_balance",
+      "type": "INTEGER",
+      "mode": "REQUIRED",
+      "sensitive": false,
+      "required": true,
+      "nullable": false
+    },
+    {
+      "name": "opening_balance",
+      "type": "INTEGER",
+      "mode": "REQUIRED",
+      "sensitive": false,
+      "required": true,
+      "nullable": false
+    },
+    {
+      "name": "overdraft_limit",
+      "type": "INTEGER",
+      "mode": "NULLABLE",
+      "sensitive": false,
+      "required": false,
+      "nullable": true
+    }
+  ],
+
+  "transactions_table_schema": [
+    {
+      "name": "counterparty_name",
+      "type": "STRING",
+      "mode": "NULLABLE",
+      "sensitive": false,
+      "required": false,
+      "nullable": true,
+      "default_value": null
+    },
+    {
+      "name": "counterparty_account_number",
+      "type": "STRING",
+      "mode": "NULLABLE",
+      "sensitive": false,
+      "required": false,
+      "nullable": true,
+      "default_value": null
+    },
+    {
+      "name": "counterparty_account_bsb",
+      "type": "STRING",
+      "mode": "NULLABLE",
+      "sensitive": false,
+      "required": false,
+      "nullable": true,
+      "default_value": null
+    },
+    {
+      "name": "counterparty_financial_institute",
+      "type": "STRING",
+      "mode": "NULLABLE",
+      "sensitive": false,
+      "required": false,
+      "nullable": true,
+      "default_value": null
+    },
+    {
+      "name": "transaction_posting_date",
+      "type": "DATE",
+      "mode": "REQUIRED",
+      "sensitive": false,
+      "required": true,
+      "nullable": false
+    },
+    {
+      "name": "transaction_value_date",
+      "type": "DATE",
+      "mode": "REQUIRED",
+      "sensitive": false,
+      "required": true,
+      "nullable": false
+    },
+    {
+      "name": "currency_code",
+      "type": "STRING",
+      "mode": "REQUIRED",
+      "sensitive": false,
+      "required": true,
+      "nullable": false
     },
     {
       "name": "transaction_amount",
       "type": "INTEGER",
-      "mode": "NULLABLE"
+      "mode": "REQUIRED",
+      "sensitive": true,
+      "required": true,
+      "nullable": false
+    },
+    {
+      "name": "debit_credit_indicator",
+      "type": "STRING",
+      "mode": "REQUIRED",
+      "sensitive": false,
+      "required": true,
+      "nullable": false
+    },
+    {
+      "name": "swift_transaction_code",
+      "type": "STRING",
+      "mode": "NULLABLE",
+      "sensitive": false,
+      "required": false,
+      "nullable": true
+    },
+    {
+      "name": "balance_date",
+      "type": "DATE",
+      "mode": "REQUIRED",
+      "sensitive": false,
+      "required": true,
+      "nullable": false
     }
   ],
 
-  "default_values": {
-    "account_name": null,
-    "source_system": "ext"
-  },
-  "sensitive_columns": [
-    "account_number",
-    "closing_balance",
-    "opening_balance",
-    "transaction_amount"
-  ], 
-  "validation_rules": {
-    "required_fields": [
-      "account_number",
-      "balance_date",
-      "currency_code",
-      "source_system"
-    ]
-  },
-  "default_typecodes": [
+  "bank_id_default_typecodes": [
     {
       "bai_code": "010",
       "bai_field": "amount",
       "bq_column": "opening_balance",
-      "table": "org"
+      "table": "balance"
     },
     {
       "bai_code": "015",
       "bai_field": "amount",
       "bq_column": "closing_balance",
-      "table": "org"
+      "table": "balance",
+      "sensitive": true
     },
-        {
+    {
       "bai_code": "263",
-      "bai_field": "Overdraft",
+      "bai_field": "amount",
       "bq_column": "overdraft_limit",
-      "table": "org"
+      "table": "balance"
+    },
+    {
+      "bai_code": "100",
+      "bai_field": "amount",
+      "bq_column": "transaction_amount",
+      "table": "transactions",
+      "sensitive": true
     }
   ],
+
   "mappings": [
     {
       "bank_id": "CITI",
-      "bai_code": "010",
-      "bq_column": "opening_balance",
-      "table": "org",
-      "bai_field": "amount"
-    },
-    {
-      "bank_id": "CITI",
-      "bai_code": "015",
-      "bq_column": "closing_balance",
-      "table": "org",
-      "bai_field": "amount"
-    },
-    {
-      "bank_id": "CITI",
-      "bai_code": "045",
-      "bq_column": "closing_balance",
-      "table": "org",
-      "bai_field": "amount"
-    },
+      "mappings": [
         {
-      "bank_id": "CITI",
-      "bai_code": "263",
-      "bq_column": "overdraft_limit",
-      "table": "org",
-      "bai_field": "Overdraft"
+          "bai_code": "010",
+          "bai_field": "amount",
+          "bq_column": "opening_balance",
+          "table": "balance",
+          "sensitive": false,
+          "required": true,
+          "nullable": false
+        },
+        {
+          "bai_code": "015",
+          "bai_field": "amount",
+          "bq_column": "closing_balance",
+          "table": "balance",
+          "sensitive": false,
+          "required": true,
+          "nullable": false
+        },
+        {
+          "bai_code": "045",
+          "bai_field": "amount",
+          "bq_column": "closing_balance",
+          "table": "balance",
+          "sensitive": false,
+          "required": true,
+          "nullable": false
+        },
+        {
+          "bai_code": "263",
+          "bai_field": "amount",
+          "bq_column": "overdraft_limit",
+          "table": "balance",
+          "sensitive": false,
+          "required": false,
+          "nullable": true
+        },
+        {
+          "bai_code": "100",
+          "bai_field": "amount",
+          "bq_column": "transaction_amount",
+          "table": "transactions",
+          "sensitive": true,
+          "required": true,
+          "nullable": false
+        }
+      ]
     },
-
     {
       "bank_id": "HSBC",
-      "bai_code": "010",
-      "bq_column": "opening_balance",
-      "table": "org",
-      "bai_field": "amount"
-    },
-    {
-      "bank_id": "HSBC",
-      "bai_code": "045",
-      "bq_column": "closing_balance",
-      "table": "org",
-      "bai_field": "amount"
-    },
-    {
-      "bank_id": "HSBC",
-      "bai_code": "195",
-      "bq_column": "interest_paid",
-      "table": "org",
-      "bai_field": "amount"
+      "mappings": [
+        {
+          "bai_code": "010",
+          "bai_field": "amount",
+          "bq_column": "opening_balance",
+          "table": "balance",
+          "sensitive": false,
+          "required": true,
+          "nullable": false
+        },
+        {
+          "bai_code": "045",
+          "bai_field": "amount",
+          "bq_column": "closing_balance",
+          "table": "balance",
+          "sensitive": false,
+          "required": true,
+          "nullable": false
+        },
+        {
+          "bai_code": "195",
+          "bai_field": "amount",
+          "bq_column": "interest_paid",
+          "table": "balance",
+          "sensitive": false,
+          "required": false,
+          "nullable": true
+        },
+        {
+          "bai_code": "100",
+          "bai_field": "amount",
+          "bq_column": "transaction_amount",
+          "table": "transactions",
+          "sensitive": true,
+          "required": true,
+          "nullable": false
+        }
+      ]
     }
   ]
-
 }
