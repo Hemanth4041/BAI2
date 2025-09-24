@@ -7,6 +7,7 @@ from google.api_core.exceptions import NotFound
 from bai_lib.bai2 import parse_from_file
 from encrypt import encrypt_row
 
+
 PROJECT_ID = "developmentenv-464809"
 DATASET_ID = "Transactions"
 INPUT_BAI_FILE = "bai_data/bai/CITI_hemanth.bai"
@@ -18,6 +19,7 @@ TRANSACTIONS_TABLE = "transactions"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
 
 def get_bank_and_customer_from_filename(filename: str):
     base = os.path.basename(filename).split(".")[0]
@@ -54,43 +56,37 @@ def read_file_from_gcs(gcs_path: str) -> str:
     blob = bucket.blob(blob_name)
     return blob.download_as_text()
 
+
 def create_base_row(customer_id, account_header, group_date, table_type):
     base_row = {
         "organisation_biz_id": customer_id,
+        "customer_id": customer_id,
         "division_biz_id": customer_id,
         "account_number": account_header.customer_account_number,
+        "balance_date": group_date.isoformat(),
+        "account_name": None,
     }
-
     if table_type == "balance":
         base_row.update({
-            "balance_date": group_date.isoformat(),
             "currency": account_header.currency or " ",
             "bsb": "",
             "financial_institute": "",
         })
     elif table_type == "transactions":
         base_row.update({
-            "balance_date": group_date.isoformat(),
             "currency_code": account_header.currency or " ",
         })
-
-    # Include customer_id for encryption
-    base_row["customer_id"] = customer_id
     return base_row
 
-def run_parser(input_file: str, config_file: str):
+def parse_bai_file(input_file, config_file):
     bank_id, customer_id = get_bank_and_customer_from_filename(input_file)
     logger.info(f"Bank ID: {bank_id}, Customer ID: {customer_id}")
-
     config = load_config(config_file)
 
     bank_config = next((m for m in config.get("mappings", []) if m.get("bank_id") == bank_id), None)
     mappings = bank_config.get("mappings", []) if bank_config else config.get("bank_id_default_typecodes", [])
-
-    if not mappings:
-        raise ValueError(f"No mappings found for bank_id={bank_id}")
-
     code_map = {m["bai_code"]: m for m in mappings}
+
 
     bai_text = read_file_from_gcs(input_file)
     bai_file = parse_from_file(io.StringIO(bai_text), check_integrity=True)
@@ -100,47 +96,42 @@ def run_parser(input_file: str, config_file: str):
 
     for group in bai_file.children:
         group_date = group.header.as_of_date
-        if not group_date:
-            raise ValueError("Group missing as_of_date")
 
         for account in group.children:
             account_header = account.header
+            balance_row = create_base_row(customer_id, account_header, group_date, "balance")
+            balance_schema = get_schema_for_table(config, "balance")
+            apply_default_values(balance_row, balance_schema)
 
-            # Process summary items (balance)
-            for summary in account_header.summary_items or []:
-                code = summary.type_code.code if summary.type_code else None
-                if code and code in code_map and code_map[code]["table"] == "balance":
-                    rule = code_map[code]
-                    value = getattr(summary, rule["bai_field"], None)
+            if account_header.summary_items:
+                for summary in account_header.summary_items:
+                    code = summary.type_code.code if summary.type_code else None
+                    if code and code in code_map and code_map[code]["table"] == "balance":
+                        bq_col = code_map[code]["bq_column"]
+                        value = getattr(summary, code_map[code]["bai_field"], None)
+                        balance_row[bq_col] = value
 
-                    row = create_base_row(customer_id, account_header, group_date, "balance")
-                    schema = get_schema_for_table(config, "balance")
-                    apply_default_values(row, schema)
-                    row[rule["bq_column"]] = value
-                    row["_target_table"] = BALANCE_TABLE
-                    balance_rows.append(row)
-
-            # Process transaction details
-            for tx in account.children or []:
+            balance_row["_target_table"] = BALANCE_TABLE
+            balance_rows.append(balance_row)
+            for tx in getattr(account, "children", []):
+                tx_row = create_base_row(customer_id, account_header, group_date, "transactions")
+                tx_schema = get_schema_for_table(config, "transactions")
+                apply_default_values(tx_row, tx_schema)
                 for code, rule in code_map.items():
-                    if rule["table"] != "transactions":
-                        continue
-                    value = getattr(tx, rule["bai_field"], None)
-                    if value is not None:
-                        row = create_base_row(customer_id, account_header, group_date, "transactions")
-                        schema = get_schema_for_table(config, "transactions")
-                        apply_default_values(row, schema)
-                        row[rule["bq_column"]] = value
-                        row["transaction_posting_date"] = getattr(tx, "posting_date", group_date).isoformat()
-                        row["transaction_value_date"] = getattr(tx, "value_date", group_date).isoformat()
-                        if "transaction_amount" in row:
-                            row["debit_credit_indicator"] = "D" if row["transaction_amount"] < 0 else "C"
+                    if rule["table"] == "transactions":
+                        value = getattr(tx, rule["bai_field"], None)
+                        if value is not None:
+                            tx_row[rule["bq_column"]] = value
+                            if rule["bq_column"] == "transaction_amount":
+                                tx_row["debit_credit_indicator"] = "D" if tx.type_code.transaction.value == "debit" else "C"
 
-                        row["_target_table"] = TRANSACTIONS_TABLE
-                        transaction_rows.append(row)
+                tx_row["transaction_posting_date"] = getattr(tx, "posting_date", group_date).isoformat()
+                tx_row["transaction_value_date"] = getattr(tx, "value_date", group_date).isoformat()
+                tx_row["_target_table"] = TRANSACTIONS_TABLE
+                transaction_rows.append(tx_row)
 
-    logger.info(f"Prepared {len(balance_rows)} balance rows and {len(transaction_rows)} transaction rows")
-    return balance_rows + transaction_rows
+    return balance_rows, transaction_rows, config
+
 
 def validate_rows(rows, config):
     for idx, row in enumerate(rows):
@@ -182,17 +173,21 @@ def load_rows_to_bq(client, dataset_ref, rows):
                 logger.error(f"Row insert error: {err}")
             raise RuntimeError("BigQuery load failed.")
 
+
 def main():
-    rows = run_parser(INPUT_BAI_FILE, MAPPING_CONFIG_FILE)
-    config = load_config(MAPPING_CONFIG_FILE)
-    validate_rows(rows, config)
+    balance_rows, transaction_rows, config = parse_bai_file(INPUT_BAI_FILE, MAPPING_CONFIG_FILE)
+
+    all_rows = balance_rows + transaction_rows
+
+    validate_rows(all_rows, config)
 
     sensitive_fields = get_all_sensitive_fields(config)
-    encrypted_rows = [encrypt_row(PROJECT_ID, LOCATION, KEY_RING, row, sensitive_fields) for row in rows]
+    encrypted_rows = [encrypt_row(PROJECT_ID, LOCATION, KEY_RING, row, sensitive_fields) for row in all_rows]
 
     bq_client = bigquery.Client(project=PROJECT_ID)
     dataset_ref = bq_client.dataset(DATASET_ID)
     load_rows_to_bq(bq_client, dataset_ref, encrypted_rows)
+
     logger.info("BAI2 processing completed.")
 
 if __name__ == "__main__":
