@@ -1,22 +1,17 @@
 from collections import OrderedDict
 
 from .constants import CONTINUATION_CODE
-from .models import \
-    Bai2File, Bai2FileHeader, Bai2FileTrailer, \
-    Group, GroupHeader, GroupTrailer, \
-    AccountIdentifier, AccountTrailer, Account, \
+from .models import (
+    Bai2File, Bai2FileHeader, Bai2FileTrailer,
+    Group, GroupHeader, GroupTrailer,
+    AccountIdentifier, AccountTrailer, Account,
     TransactionDetail
+)
 from .utils import write_date, write_time, convert_to_string
 
 
 class BaseWriter:
     def __init__(self, obj, line_length=80, text_on_new_line=False, clock_format_for_intra_day=False):
-        """
-        Keyword arguments:
-        line_length -- number of characters per record (default 80)
-        text_on_new_line -- whether to begin a text field in a new record (default False)
-        clock_format_for_intra_day -- use HH:MM:SS instead of HHMM for intra-day times (default False)
-        """
         self.obj = obj
         self.line_length = line_length
         self.text_on_new_line = text_on_new_line
@@ -33,13 +28,16 @@ class BaseSectionWriter(BaseWriter):
     trailer_writer_class = None
 
     def write(self):
+        if not self.obj.header or not self.obj.trailer:
+            raise ValueError(f"{self.obj.__class__.__name__} missing header or trailer.")
+
         header = self.header_writer_class(
             self.obj.header,
             line_length=self.line_length,
             text_on_new_line=self.text_on_new_line,
             clock_format_for_intra_day=self.clock_format_for_intra_day
         ).write() if self.obj.header else []
-        
+
         children = []
         for child in self.obj.children:
             children += self.child_writer_class(
@@ -50,8 +48,7 @@ class BaseSectionWriter(BaseWriter):
             ).write()
 
         self.obj.update_totals()
-        if self.obj.trailer:
-            self.obj.trailer.number_of_records = len(header) + len(children) + 1
+        self.obj.trailer.number_of_records = len(header) + len(children) + 1
 
         trailer = self.trailer_writer_class(
             self.obj.trailer,
@@ -59,7 +56,7 @@ class BaseSectionWriter(BaseWriter):
             text_on_new_line=self.text_on_new_line,
             clock_format_for_intra_day=self.clock_format_for_intra_day
         ).write() if self.obj.trailer else []
-        
+
         return header + children + trailer
 
 
@@ -69,10 +66,10 @@ class BaseSingleWriter(BaseWriter):
     def _write_field_from_config(self, field_config):
         if isinstance(field_config, str):
             field_config = (field_config, lambda w, x: x)
-        
+
         field_name, write_func = field_config
         field_value = getattr(self.obj, field_name, None)
-        
+
         if field_value is not None:
             output = write_func(self, field_value)
             if isinstance(output, dict):
@@ -80,7 +77,6 @@ class BaseSingleWriter(BaseWriter):
             else:
                 return {field_name: convert_to_string(output)}
         else:
-            # Don't write fields that are None - let them be empty
             return {field_name: ''}
 
     def _write_fields_from_config(self, fields_config):
@@ -93,17 +89,17 @@ class BaseSingleWriter(BaseWriter):
         record = ''
         fields = self._write_fields_from_config(self.fields_config)
         record += self.model.code.value
-        
+
         for field_name in fields:
             record += ',' + fields[field_name]
-        
+
         record += '/'
         return [record]
 
 
 def expand_availability(writer, availability):
     fields = OrderedDict()
-    
+
     if not availability or len(availability) == 0:
         pass
     elif list(availability.keys()) in [['0', '1', '>1'], ['date', 'time']]:
@@ -111,7 +107,7 @@ def expand_availability(writer, availability):
             if field == 'date':
                 value = write_date(value) if value else None
             elif field == 'time':
-                value = (write_time(value, writer.clock_format_for_intra_day) 
+                value = (write_time(value, writer.clock_format_for_intra_day)
                         if value else None)
             fields[field] = convert_to_string(value) if value is not None else ''
     else:
@@ -119,7 +115,7 @@ def expand_availability(writer, availability):
         for field, value in availability.items():
             fields['day_%s' % str(field)] = convert_to_string(field)
             fields['amount_%s' % str(field)] = convert_to_string(value)
-    
+
     return fields
 
 
@@ -137,59 +133,48 @@ class TransactionDetailWriter(BaseSingleWriter):
 
     def write(self):
         records = ['']
-        fields = self._write_fields_from_config(self.fields_config)
         i = 0
-        records[i] += self.model.code.value
 
-        for field_name in fields:
-            if field_name == 'text' and self.obj.text:
+        for field_config in self.fields_config:
+            if isinstance(field_config, tuple):
+                name, func = field_config
+                value = func(self, getattr(self.obj, name, None))
+            else:
+                value = convert_to_string(getattr(self.obj, field_config, ''))
+
+            # Text continuation logic
+            if field_config == 'text' and value:
                 text_cursor = 0
-                if self.text_on_new_line:
-                    records[i] += '/'
-                    records.append(CONTINUATION_CODE)
-                    i += 1
-                
-                while text_cursor < len(self.obj.text):
-                    # -1 for comma after preceding field
-                    remaining_line_length = (self.line_length - len(records[i])) - 1
-                    if remaining_line_length > 0:
-                        end_index = text_cursor + remaining_line_length
-                        records[i] += ',' + self.obj.text[text_cursor:end_index]
-                        text_cursor = end_index
-                    else:
+                while text_cursor < len(value):
+                    remaining = self.line_length - len(records[i]) - 1
+                    if remaining <= 0:
                         records.append(CONTINUATION_CODE)
                         i += 1
+                        remaining = self.line_length - len(records[i]) - 1
+                    end = text_cursor + remaining
+                    records[i] += ',' + value[text_cursor:end]
+                    text_cursor = end
             else:
-                records[i] += ',' + fields[field_name]
-        
+                if records[i] != '':
+                    records[i] += ','
+                records[i] += value
+
+        records[i] += '/'
         return records
 
 
 def expand_summary_items(writer, summary_items):
     items = OrderedDict()
-    
     if not summary_items:
         return items
-        
-    for n, summary_item in enumerate(summary_items):
-        for summary_field_config in AccountIdentifierWriter.summary_fields_config:
-            if isinstance(summary_field_config, str):
-                summary_field_config = (summary_field_config, lambda w, x: x)
-            
-            summary_field_name, write_func = summary_field_config
-            field_value = getattr(summary_item, summary_field_name, None)
-            
-            if field_value is not None:
-                output = write_func(writer, field_value)
-                if isinstance(output, dict):
-                    items.update(OrderedDict(
-                        [('%s_%s' % (k, n), v) for k, v in output.items()]
-                    ))
-                else:
-                    items['%s_%s' % (summary_field_name, n)] = convert_to_string(output)
-            else:
-                items['%s_%s' % (summary_field_name, n)] = ''
-    
+
+    for n, item in enumerate(summary_items):
+        for field_config in AccountIdentifierWriter.summary_fields_config:
+            if isinstance(field_config, str):
+                field_config = (field_config, lambda w, x: convert_to_string(x))
+            name, func = field_config
+            value = func(writer, getattr(item, name, None))
+            items[f"{name}_{n}"] = value if value is not None else ''
     return items
 
 
@@ -197,31 +182,34 @@ class AccountIdentifierWriter(BaseSingleWriter):
     model = AccountIdentifier
     fields_config = [
         'customer_account_number',
-        'currency',
         ('summary_items', expand_summary_items),
     ]
-    
+
     summary_fields_config = [
-        ('type_code', lambda w, tc: tc.code if tc else None),
-        'amount',
-        'item_count',
-        ('funds_type', lambda w, ft: ft.value if ft else None),
+        ('type_code', lambda w, tc: tc.code if tc else ''),
+        ('amount', lambda w, a: convert_to_string(a)),
+        ('item_count', lambda w, c: convert_to_string(c)),
+        ('funds_type', lambda w, ft: ft.value if ft else ''),
         ('availability', expand_availability),
     ]
 
     def write(self):
         records = ['']
-        fields = self._write_fields_from_config(self.fields_config)
         i = 0
-        records[i] += self.model.code.value
+        fields = self._write_fields_from_config(self.fields_config)
 
-        for field_name in fields:
-            field_length = len(fields[field_name]) + 2
-            if (len(records[i]) + field_length) >= self.line_length:
-                records[i] += '/'
-                records.append(CONTINUATION_CODE)
-                i += 1
-            records[i] += ',' + fields[field_name]
+        for field_name, value in fields.items():
+            while value:
+                remaining = self.line_length - len(records[i]) - 2
+                if remaining <= 0:
+                    records.append(CONTINUATION_CODE)
+                    i += 1
+                    remaining = self.line_length - len(records[i]) - 2
+                chunk = value[:remaining]
+                if records[i] != '':
+                    records[i] += ','
+                records[i] += chunk
+                value = value[remaining:]
 
         records[i] += '/'
         return records
@@ -250,7 +238,7 @@ class GroupHeaderWriter(BaseSingleWriter):
         ('group_status', lambda w, gs: gs.value if gs else None),
         ('as_of_date', lambda w, d: write_date(d) if d else None),
         ('as_of_time', lambda w, t: write_time(t, w.clock_format_for_intra_day) if t else None),
-        'currency',
+        # currency field ignored as requested
         ('as_of_date_modifier', lambda w, aodm: aodm.value if aodm else None),
     ]
 
