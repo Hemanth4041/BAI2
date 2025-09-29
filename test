@@ -1,163 +1,86 @@
+"""
+Main orchestrator for the BAI2 to TXT pipeline.
+Configures logging and defines the main execution flow.
+"""
+
 import os
 import io
-import json
 import logging
-from google.cloud import storage
-from bai_lib.bai2 import parse_from_file
+import sys
+import argparse
+from bai_parser import parse_from_file
+from bai_pipeline import settings, config_loader, transformer, validator
+from gcp import storage
 
-# ---------------------------
-# CONFIG
-# ---------------------------
-PROJECT_ID = "developmentenv-464809"
-INPUT_BAI_FILE = "bai_data/bai/CITI_hemanth.bai"
-MAPPING_CONFIG_FILE = "bq_mapping.json"
-BALANCE_TABLE = "balance"
-TRANSACTIONS_TABLE = "transactions"
-OUTPUT_FILE = "parsed_output.txt"
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+# Configure root logger
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    stream=sys.stdout
+)
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------
-# HELPERS
-# ---------------------------
-def get_bank_and_customer_from_filename(filename: str):
+def _get_identifiers_from_filename(filename: str) -> tuple[str, str]:
+    """Extracts bank_id and customer_id from a filename like 'BANK_CUSTOMER.txt'."""
     base = os.path.basename(filename).split(".")[0]
     parts = base.split("_")
+    if len(parts) < 2:
+        raise ValueError(f"Filename '{filename}' does not match 'BANKID_CUSTOMERID' format.")
     return parts[0], parts[1]
 
 
-def load_config(config_file: str):
-    with open(config_file, "r") as f:
-        return json.load(f)
+def run(input_gcs_path: str, output_path: str):
+    """Executes the BAI2 processing pipeline and writes transformed rows to a TXT file."""
+    logger.info(f"--- Starting BAI2 pipeline for file: {input_gcs_path} ---")
+    try:
+        # 1. Load Config
+        config = config_loader.load_config(settings.MAPPING_CONFIG_PATH)
+        bank_id, customer_id = _get_identifiers_from_filename(input_gcs_path)
+        logger.info(f"Identified Bank ID: '{bank_id}', Customer ID: '{customer_id}'")
+
+        # 2. Read and Parse
+        bai_text = storage.read_file_from_gcs(input_gcs_path)
+        bai_file = parse_from_file(io.StringIO(bai_text), check_integrity=True)
+
+        # 3. Transform
+        bank_mappings = config_loader.get_bank_mappings(config, bank_id)
+        transformed_rows = transformer.transform_bai_to_rows(bai_file, customer_id, config, bank_mappings)
+        if not transformed_rows:
+            logger.warning("Transformation resulted in zero rows. Pipeline finished successfully.")
+            return
+
+        # 4. Validate
+        validator.validate_rows(transformed_rows, config)
+
+        # 5. Write to TXT file
+        logger.info(f"Writing {len(transformed_rows)} rows to {output_path}")
+        with open(output_path, "w", encoding="utf-8") as f:
+            for row in transformed_rows:
+                f.write(str(row) + "\n")
+
+        logger.info("--- BAI2 pipeline completed successfully. ---")
+
+    except Exception as e:
+        logger.error(f"--- Pipeline failed with a critical error: {e} ---", exc_info=True)
+        raise
 
 
-def apply_default_values(row, schema):
-    for col in schema:
-        if "default_value" in col and row.get(col["name"]) is None:
-            row[col["name"]] = col["default_value"]
-
-
-def get_schema_for_table(config, table_name):
-    common_fields = config.get("common_fields_schema", [])
-    table_fields = []
-    if table_name == "balance":
-        table_fields = config.get("balance_table_schema", [])
-    elif table_name == "transactions":
-        table_fields = config.get("transactions_table_schema", [])
-    return common_fields + table_fields
-
-
-def read_file_from_gcs(gcs_path: str) -> str:
-    if "/" not in gcs_path:
-        raise ValueError("Invalid GCS path format")
-    bucket_name, blob_name = gcs_path.split("/", 1)
-    storage_client = storage.Client(project=PROJECT_ID)
-    bucket = storage_client.bucket(bucket_name)
-    blob = bucket.blob(blob_name)
-    return blob.download_as_text()
-
-
-def create_base_row(customer_id, account_header, group_date, table_type):
-    base_row = {
-        "organisation_biz_id": customer_id,
-        "customer_id": customer_id,
-        "division_biz_id": customer_id,
-        "account_number": account_header.customer_account_number,
-        "balance_date": group_date.isoformat(),
-        "account_name": None,
-    }
-    if table_type == "balance":
-        base_row.update({
-            "currency": account_header.currency,
-            "bsb": "",
-            "financial_institute": "",
-        })
-    elif table_type == "transactions":
-        base_row.update({
-            "currency_code": account_header.currency,
-        })
-    return base_row
-
-
-# ---------------------------
-# PARSER
-# ---------------------------
-def parse_bai_file(input_file, config_file):
-    bank_id, customer_id = get_bank_and_customer_from_filename(input_file)
-    logger.info(f"Bank ID: {bank_id}, Customer ID: {customer_id}")
-    config = load_config(config_file)
-
-    bank_config = next((m for m in config.get("mappings", []) if m.get("bank_id") == bank_id), None)
-    mappings = bank_config.get("mappings", []) if bank_config else config.get("bank_id_default_typecodes", [])
-    code_map = {m["bai_code"]: m for m in mappings}
-
-    bai_text = read_file_from_gcs(input_file)
-    bai_file = parse_from_file(io.StringIO(bai_text), check_integrity=True)
-
-    balance_rows = []
-    transaction_rows = []
-
-    for group in bai_file.children:
-        group_date = group.header.as_of_date
-
-        for account in group.children:
-            account_header = account.header
-            balance_row = create_base_row(customer_id, account_header, group_date, "balance")
-            balance_schema = get_schema_for_table(config, "balance")
-            apply_default_values(balance_row, balance_schema)
-
-            if account_header.summary_items:
-                for summary in account_header.summary_items:
-                    code = summary.type_code.code if summary.type_code else None
-                    if code and code in code_map and code_map[code]["table"] == "balance":
-                        bq_col = code_map[code]["bq_column"]
-                        value = getattr(summary, code_map[code]["bai_field"], None)
-                        balance_row[bq_col] = value
-
-            balance_row["_target_table"] = BALANCE_TABLE
-            balance_rows.append(balance_row)
-
-            for tx in getattr(account, "children", []):
-                tx_row = create_base_row(customer_id, account_header, group_date, "transactions")
-                tx_schema = get_schema_for_table(config, "transactions")
-                apply_default_values(tx_row, tx_schema)
-
-                for code, rule in code_map.items():
-                    if rule["table"] == "transactions":
-                        value = getattr(tx, rule["bai_field"], None)
-                        if value is not None:
-                            tx_row[rule["bq_column"]] = value
-                            if rule["bq_column"] == "transaction_amount":
-                                tx_row["debit_credit_indicator"] = (
-                                    "D" if tx.type_code.transaction.value == "debit" else "C"
-                                )
-
-                tx_row["transaction_posting_date"] = getattr(tx, "posting_date", group_date).isoformat()
-                tx_row["transaction_value_date"] = getattr(tx, "value_date", group_date).isoformat()
-                tx_row["_target_table"] = TRANSACTIONS_TABLE
-                transaction_rows.append(tx_row)
-
-    return balance_rows, transaction_rows
-
-
-# ---------------------------
-# MAIN
-# ---------------------------
-def main():
-    balance_rows, transaction_rows = parse_bai_file(INPUT_BAI_FILE, MAPPING_CONFIG_FILE)
-
-    all_rows = balance_rows + transaction_rows
-    logger.info(f"Parsed {len(balance_rows)} balance rows and {len(transaction_rows)} transaction rows")
-
-    # Write output to a file
-    with open(OUTPUT_FILE, "w") as f:
-        for row in all_rows:
-            f.write(json.dumps(row) + "\n")
-
-    logger.info(f"Results written to {OUTPUT_FILE}")
-
-
-if __name__ == "__main__":
-    main()
+def run_cli():
+    """Parses command-line arguments and triggers the pipeline."""
+    parser = argparse.ArgumentParser(description="Run the BAI2 to TXT processing pipeline.")
+    parser.add_argument(
+        "input_file",
+        type=str,
+        help="The full GCS path to the input BAI file (e.g., 'gs://my-bucket/data/CITI_customer.bai')."
+    )
+    parser.add_argument(
+        "output_file",
+        type=str,
+        help="The local path to save the processed rows (e.g., './output.txt')."
+    )
+    args = parser.parse_args()
+    try:
+        run(args.input_file, args.output_file)
+    except Exception:
+        sys.exit(1)
