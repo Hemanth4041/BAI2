@@ -1,85 +1,88 @@
-"""
-Main orchestrator for the BAI2 to TXT pipeline (local testing).
-"""
-
-import os
-import io
-import logging
-import sys
-import argparse
-from bai_parser import parse_from_file
-from bai_pipeline import settings, config_loader, transformer, validator
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    stream=sys.stdout
-)
-logger = logging.getLogger(__name__)
+from .constants import RecordCode
+from .models import Record
 
 
-def _get_identifiers_from_filename(filename: str) -> tuple[str, str]:
-    """Extract bank_id and customer_id from a filename like 'BANK_CUSTOMER.bai'."""
-    base = os.path.basename(filename).split(".")[0]
-    parts = base.split("_")
-    if len(parts) < 2:
-        raise ValueError(f"Filename '{filename}' does not match 'BANKID_CUSTOMERID' format.")
-    return parts[0], parts[1]
+def _build_account_identifier_record(rows):
+    fields_str = ''
+    for index, row in enumerate(rows):
+        field_str = row[1]
+        commas_count = field_str.count(',')
+        # first row will have account identifier and currency (the common part of the account identifier)
+        # and then a multiple of 4 commas (the rest of the account identifier, which are summary components)
+        # the rest of the rows will have only the summary components
+        summary_commas_count = commas_count - 2 if index == 0 else commas_count
+
+        if field_str:
+            if field_str[-1] == '/':
+                fields_str += field_str[:-1]
+                if summary_commas_count % 4 != 0:
+                    # if the number of commas is not a multiple of 4, then we need to add a comma
+                    # some banks emit this extra comma, some don't, so we need to normalize it
+                    fields_str += ','
+            else:
+                fields_str += field_str
+
+    fields = fields_str.split(',')
+    return Record(code=rows[0][0], fields=fields, rows=rows)
 
 
-def run_local(input_file: str, output_file: str):
-    """Runs the pipeline locally: reads BAI2 from local, writes results to a TXT file."""
-    logger.info(f"--- Starting local BAI2 pipeline for file: {input_file} ---")
-    try:
-        # 1. Load config
-        config = config_loader.load_config(settings.MAPPING_CONFIG_PATH)
-        bank_id, customer_id = _get_identifiers_from_filename(input_file)
-        logger.info(f"Identified Bank ID: '{bank_id}', Customer ID: '{customer_id}'")
+def _build_generic_record(rows):
+    fields_str = ''
+    for row in rows:
+        field_str = row[1]
 
-        # 2. Read file locally
-        with open(input_file, "r", encoding="utf-8") as f:
-            bai_text = f.read()
+        if field_str:
+            if field_str[-1] == '/':
+                fields_str += field_str[:-1] + ','
+            else:
+                fields_str += field_str + ' '
 
-        # 3. Parse
-        bai_file = parse_from_file(io.StringIO(bai_text), check_integrity=True)
-
-        # 4. Transform
-        bank_mappings = config_loader.get_bank_mappings(config, bank_id)
-        transformed_rows = transformer.transform_bai_to_rows(
-            bai_file, customer_id, config, bank_mappings
-        )
-        if not transformed_rows:
-            logger.warning("Transformation produced zero rows. Nothing to write.")
-            return
-
-        # 5. Validate
-        validator.validate_rows(transformed_rows, config)
-
-        # 6. Write to TXT
-        logger.info(f"Writing {len(transformed_rows)} rows to {output_file}")
-        with open(output_file, "w", encoding="utf-8") as f:
-            for row in transformed_rows:
-                f.write(str(row) + "\n")
-
-        logger.info("--- Local BAI2 pipeline completed successfully. ---")
-
-    except Exception as e:
-        logger.error(f"--- Pipeline failed: {e} ---", exc_info=True)
-        raise
+    fields = fields_str[:-1].split(',')
+    return Record(code=rows[0][0], fields=fields, rows=rows)
 
 
-def run_cli():
-    """Run from CLI for local testing."""
-    parser = argparse.ArgumentParser(description="Run the BAI2 to TXT pipeline locally.")
-    parser.add_argument("input_file", type=str, help="Path to local BAI2 input file.")
-    parser.add_argument("output_file", type=str, help="Path to local TXT output file.")
-    args = parser.parse_args()
-    try:
-        run_local(args.input_file, args.output_file)
-    except Exception:
-        sys.exit(1)
+RecordBuilderFactory = {
+    RecordCode.file_header: _build_generic_record,
+    RecordCode.group_header: _build_generic_record,
+    RecordCode.account_identifier: _build_account_identifier_record,
+    RecordCode.transaction_detail: _build_generic_record,
+    RecordCode.account_trailer: _build_generic_record,
+    RecordCode.group_trailer: _build_generic_record,
+    RecordCode.file_trailer: _build_generic_record,
+}
 
 
-if __name__ == "__main__":
-    run_cli()
+def _build_record(rows):
+    record_code = rows[0][0]
+    return RecordBuilderFactory[record_code](rows)
+
+
+def record_generator(lines):
+    rows = iter(
+        [(RecordCode(line[:2]), line[3:]) for line in lines]
+    )
+
+    records = [next(rows)]
+    while True:
+        try:
+            row = next(rows)
+        except StopIteration:
+            break
+
+        if row[0] != RecordCode.continuation:
+            yield _build_record(records)
+            records = [row]
+        else:
+            records.append(row)
+
+    yield _build_record(records)
+
+
+class IteratorHelper:
+    def __init__(self, lines):
+        self._generator = record_generator(lines)
+        self.current_record = None
+        self.advance()
+
+    def advance(self):
+        self.current_record = next(self._generator)
